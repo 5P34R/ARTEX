@@ -31,6 +31,7 @@ import { api } from "@/lib/api";
 import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
+import { ChatGPTAccountPicker } from "./_components/chatgpt-account";
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
 import { setVisibleInterval } from "@/lib/polling";
 
@@ -67,7 +68,7 @@ const MAX_TOKENS_FIELD_HINTS: Record<string, string> = {
 };
 // LLM profile formats. The default in the create form is "anthropic"; "ollama" is the
 // keyless local-server format (base URL defaults to http://127.0.0.1:11434/v1).
-type ProfileFormat = "anthropic" | "openai" | "openai-responses" | "ollama" | "bedrock-gateway";
+type ProfileFormat = "anthropic" | "openai" | "openai-responses" | "ollama" | "bedrock-gateway" | "chatgpt-plan";
 const OLLAMA_DEFAULT_BASE_URL = "http://127.0.0.1:11434/v1";
 const EFFORT_LEVELS: { value: string; label: string }[] = [
   { value: NONE, label: t("Not sent (default)") },
@@ -89,7 +90,14 @@ function cooldownText(secs: number) {
 // records (with polling off no new records appear, so "healthy" = no known failure).
 type Health = { label: string; cls: string; hint?: string };
 function healthOf(p: LLMProfile, m?: LLMPoolMember): Health {
-  if (!p.api_key_hint && p.format !== "ollama") {
+  if (p.format === "chatgpt-plan" && !p.oauth_account_id) {
+    return {
+      label: t("Not signed in"),
+      cls: "border-muted-foreground/40 text-muted-foreground",
+      hint: t("Sign in with ChatGPT in this profile"),
+    };
+  }
+  if (!p.api_key_hint && p.format !== "ollama" && p.format !== "chatgpt-plan") {
     return {
       label: t("No Key configured"),
       cls: "border-muted-foreground/40 text-muted-foreground",
@@ -357,6 +365,7 @@ function ProfileSheet({
   const [customHeaders, setCustomHeaders] = React.useState("");
   const [clearCustomHeaders, setClearCustomHeaders] = React.useState(false);
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // retry override for this profile; all 0 = follow the global
+  const [accountId, setAccountId] = React.useState(""); // chatgpt-plan: the signed-in ChatGPT account
   const [testing, setTesting] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [models, setModels] = React.useState<string[]>([]);
@@ -370,7 +379,11 @@ function ProfileSheet({
     if (!open) return;
     setName(profile?.name ?? "");
     setFormat(
-      profile?.format === "openai" || profile?.format === "openai-responses" || profile?.format === "ollama" || profile?.format === "bedrock-gateway"
+      profile?.format === "openai" ||
+        profile?.format === "openai-responses" ||
+        profile?.format === "ollama" ||
+        profile?.format === "bedrock-gateway" ||
+        profile?.format === "chatgpt-plan"
         ? profile.format
         : "anthropic",
     );
@@ -392,6 +405,7 @@ function ProfileSheet({
     setCustomHeaders("");
     setClearCustomHeaders(false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
+    setAccountId(profile?.oauth_account_id ?? "");
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
     setModels([]);
@@ -449,6 +463,7 @@ function ProfileSheet({
         sessionHeaderKey.trim(),
         userAgent.trim(),
         customHeaders,
+        format === "chatgpt-plan" ? accountId : "",
       );
       // Show the reply too: only when the model demonstrably spoke is this the same as working inside a session.
       if (r.ok)
@@ -466,6 +481,10 @@ function ProfileSheet({
   async function save() {
     if (!name.trim() || !model.trim()) {
       toast.error(t("Please fill in a name and a model"));
+      return;
+    }
+    if (format === "chatgpt-plan" && !accountId) {
+      toast.error(t("Sign in with ChatGPT and choose the account first"));
       return;
     }
     if (saving) return;
@@ -495,6 +514,7 @@ function ProfileSheet({
         user_agent: userAgent.trim(),
         custom_headers: format === "bedrock-gateway" ? customHeaders : "",
         clear_custom_headers: clearCustomHeaders,
+        ...(format === "chatgpt-plan" ? { oauth_account_id: Number(accountId), base_url: "", api_key: "", max_tokens: 0 } : {}),
         retry,
       });
       if (isNew) toast.success(t('Created: {name} (use "Set as active" on its card to enable it)', { name: name.trim() }));
@@ -571,6 +591,7 @@ function ProfileSheet({
                   <SelectItem value="openai-responses">OpenAI (Responses API)</SelectItem>
                   <SelectItem value="ollama">{t("Ollama (local, no key needed)")}</SelectItem>
                   <SelectItem value="bedrock-gateway">Bedrock gateway</SelectItem>
+                  <SelectItem value="chatgpt-plan">{t("ChatGPT plan (Sign in with ChatGPT)")}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -602,7 +623,7 @@ function ProfileSheet({
                     variant="outline"
                     size="icon"
                     className="shrink-0"
-                    disabled={loadingModels || format === "bedrock-gateway"}
+                    disabled={loadingModels || format === "bedrock-gateway" || format === "chatgpt-plan"}
                     onClick={loadModels}
                     title={t("Load available models from the API")}
                   >
@@ -649,7 +670,11 @@ function ProfileSheet({
             </div>
           </div>
 
-          <div className="grid gap-2">
+          {format === "chatgpt-plan" && (
+            <ChatGPTAccountPicker accountId={accountId} onAccountChange={setAccountId} onPickModel={setModel} />
+          )}
+
+          <div className={cn("grid gap-2", format === "chatgpt-plan" && "hidden")}>
             <Label htmlFor="p-base-url">{format === "bedrock-gateway" ? "Gateway base URL (required)" : t("Base URL (optional)")}</Label>
             <Input
               id="p-base-url"
@@ -721,7 +746,7 @@ function ProfileSheet({
             </p>
           </div>
 
-          <div className="grid gap-2">
+          <div className={cn("grid gap-2", format === "chatgpt-plan" && "hidden")}>
             <Label htmlFor="p-api-key">
               {keyLabel}
             </Label>
@@ -946,6 +971,19 @@ export default function LLMPage() {
     } catch {
       /* ignore */
     }
+  }, []);
+
+  // Outcome of a ChatGPT sign-in: /auth/callback redirects here with ?chatgpt=<status> or ?chatgpt_error=<message>.
+  React.useEffect(() => {
+    const q = new URLSearchParams(window.location.search);
+    const status = q.get("chatgpt");
+    const err = q.get("chatgpt_error");
+    if (!status && !err) return;
+    if (err) toast.error(t("ChatGPT sign-in failed: {error}", { error: err }));
+    else if (status === "plan_disabled")
+      toast.warning(t("Signed in, but plan usage was not allowed; use “Allow plan usage” on the profile."));
+    else toast.success(t("Signed in with ChatGPT. You can close the sign-in tab."));
+    window.history.replaceState(null, "", window.location.pathname);
   }, []);
 
   const load = React.useCallback(async () => {

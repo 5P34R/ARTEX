@@ -9,6 +9,7 @@ import { MOCK } from "@/lib/mock/enabled";
 import { mockHandle } from "@/lib/mock/handler";
 import type {
   ActiveFindingRetest,
+  ChatGPTAccount,
   Activity,
   Agent,
   AgentDetail,
@@ -1145,6 +1146,7 @@ export const api = {
     session_header_key = "", // non-empty = the test request also carries this custom session header (value is a one-off session id)
     user_agent = "", // non-empty = the test overrides the User-Agent header with this value
     custom_headers = "",
+    account_id = "", // chatgpt-plan: the signed-in ChatGPT account to test with
   ) =>
     // reply = the model's actual reply (truncated); the backend marks a profile that replies with nothing as failed
     post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
@@ -1160,6 +1162,7 @@ export const api = {
       session_header_key,
       user_agent,
       custom_headers,
+      ...(account_id ? { account_id } : {}),
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
@@ -1184,8 +1187,25 @@ export const api = {
     user_agent?: string; // non-empty = override the User-Agent header on every request; "" = keep the default UA
     custom_headers?: string; // static Bedrock gateway headers; values are write-only
     clear_custom_headers?: boolean;
+    oauth_account_id?: number; // chatgpt-plan: the signed-in ChatGPT account this profile uses
     retry?: LLMRetryOverride; // this profile's retry override; all zeros = follow the global retry policy
   }) => post<{ id: number }>("/llm/profiles", p),
+  // Sign in with ChatGPT (chatgpt-plan profiles).
+  chatgptAccounts: () =>
+    get<{ accounts: ChatGPTAccount[]; registered: boolean }>("/llm/chatgpt/accounts").then((r) => ({
+      accounts: arr(r.accounts),
+      registered: r.registered,
+    })),
+  chatgptSignin: (account_id?: string, enable_plan = false) =>
+    post<{ authorize_url: string; redirect_uri: string }>("/llm/chatgpt/signin", {
+      ...(account_id ? { account_id } : {}),
+      enable_plan,
+    }),
+  chatgptPasteCallback: (url: string) => post<{ account: ChatGPTAccount }>("/llm/chatgpt/callback-paste", { url }),
+  chatgptSignout: (id: string) => post<{ ok: boolean; revoked: boolean }>(`/llm/chatgpt/accounts/${id}/signout`, {}),
+  chatgptDeleteAccount: (id: string) => del<{ ok: boolean }>(`/llm/chatgpt/accounts/${id}`),
+  chatgptModels: (id: string) =>
+    get<{ ok: boolean; error?: string; models?: { id: string; name: string }[] }>(`/llm/chatgpt/accounts/${id}/models`),
   deleteLLMProfile: (id: string) => del<{ deleted: number }>(`/llm/profiles/${id}`),
   activateLLMProfile: (id: string) => post<{ ok: boolean }>("/llm/profiles/active", { id: Number(id) }),
   // The pool chain's actual order + each profile's breaker state.
