@@ -382,3 +382,24 @@ func TestTrimErrKeepsValidUTF8(t *testing.T) {
 		t.Fatalf("trimErr = %q (%d bytes), want at most 300 bytes plus …", got, len(got))
 	}
 }
+
+// A ChatGPT plan refusal carries NoFailoverMarker: whatever its status (here a
+// 403, and a transport-level error with no status), the pool must surface it
+// instead of moving the request to the next, possibly paid, profile.
+func TestNoFailoverOnPlanRefusal(t *testing.T) {
+	for _, planErr := range []error{
+		fmt.Errorf("openai-responses: status 403: %s ChatGPT plan usage limit reached", NoFailoverMarker),
+		fmt.Errorf("%s ChatGPT sign-in expired: sign in again", NoFailoverMarker),
+	} {
+		a := &fakeProv{name: "a", errs: []error{planErr}}
+		b := okProv("b", "paid")
+		p := New([]*Member{member(1, "a", 10, a), member(2, "b", 5, b)}, NewRegistry(nil, nil))
+		_, err := drain(p.Stream(context.Background(), llm.CompletionRequest{}))
+		if err == nil || !IsNoFailover(err) {
+			t.Fatalf("err=%v, want the plan refusal surfaced", err)
+		}
+		if b.calls != 0 {
+			t.Fatalf("plan refusal %q failed over to the next profile", planErr)
+		}
+	}
+}

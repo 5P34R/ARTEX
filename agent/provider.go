@@ -12,6 +12,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -94,6 +95,10 @@ type Config struct {
 	UserAgent string
 	// CustomHeaders are static Bedrock gateway headers, one Name: Value per line.
 	CustomHeaders string
+	// TokenSource supplies the OAuth access token of a FormatChatGPTPlan profile
+	// (nil for every other format). Set by the server from the profile's
+	// chatgpt_accounts row; never persisted.
+	TokenSource TokenSource
 	// Retry holds the retry parameters resolved for this config (profile override →
 	// global policy → built-in default, resolved server-side). See RetryConfig for
 	// the per-layer semantics; zero values = fully inherit the built-in defaults.
@@ -175,7 +180,7 @@ func normalizeOllamaBaseURL(raw string) string {
 
 // NeedsAPIKey reports whether this provider format requires an API key to be
 // usable. Ollama (local server) is keyless; every cloud format needs one.
-func (c Config) NeedsAPIKey() bool { return c.Format != FormatOllama }
+func (c Config) NeedsAPIKey() bool { return c.Format != FormatOllama && c.Format != FormatChatGPTPlan }
 
 // CompactionWindow returns the model context window in TOKENS for compaction
 // thresholds, resolved from the user-configured size (ContextWindowK). 0/unset →
@@ -334,6 +339,11 @@ func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
 		if c.Model == "" {
 			c.Model = "llama3.2"
 		}
+	case "chatgpt-plan":
+		c.Format = FormatChatGPTPlan
+		// Plan-billed inference has exactly one endpoint and no API key; the
+		// OAuth token comes from Config.TokenSource.
+		c.BaseURL, c.APIKey = ChatGPTPlanBaseURL, ""
 	case "bedrock-gateway":
 		c.Format = FormatBedrockGateway
 		// No public-provider defaults: an absent URL, model or token fails closed.
@@ -371,6 +381,8 @@ func (c Config) Provider() string {
 		return "ollama"
 	case FormatBedrockGateway:
 		return "bedrock-gateway"
+	case FormatChatGPTPlan:
+		return "chatgpt-plan"
 	}
 	return "anthropic"
 }
@@ -410,6 +422,18 @@ func (c Config) NewProvider() (llm.Provider, error) {
 		qt.base = &bedrockGatewayTransport{base: qt.base, baseURL: baseURL, token: apiKey, model: c.Model, headers: headers}
 		client.Transport = qt
 		client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	}
+	if wireFormat == FormatChatGPTPlan {
+		if c.TokenSource == nil {
+			return nil, errors.New("chatgpt-plan profile has no signed-in ChatGPT account")
+		}
+		if strings.TrimSpace(c.Model) == "" {
+			return nil, errors.New("chatgpt-plan profile needs a model")
+		}
+		wireFormat, baseURL, apiKey = llm.FormatOpenAIResponses, chatgptPlanEndpoint, chatgptPlanPlaceholderKey
+		qt := client.Transport.(quotaAwareTransport)
+		qt.base = &chatgptPlanTransport{base: qt.base, tokens: c.TokenSource}
+		client.Transport = qt
 	}
 	lc := llm.Config{
 		Format:     wireFormat,
