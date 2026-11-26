@@ -1623,3 +1623,34 @@ CREATE INDEX IF NOT EXISTS idx_coverage_ledger_history_task ON coverage_ledger_h
 -- written with the guarded terminal status, cleared when the task moves back to a
 -- non-terminal state (revive), so an earlier run's reason never marks a later one.
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS end_reason TEXT NOT NULL DEFAULT '';
+
+-- ---------------------------------------------------------------------------
+-- ChatGPT plan login ("Sign in with ChatGPT"), fork-only. Kept idempotent here
+-- rather than as a numbered migration, and without touching the llm_profiles
+-- format CHECK, so upstream migrations and upstream binaries keep working on
+-- this database. A ChatGPT plan profile is stored as format 'openai-responses'
+-- with oauth_account_id set; the Go layer reports it as format 'chatgpt-plan'.
+-- id_token / access_token / refresh_token are encrypted at rest (db/secrets.go);
+-- client_id is the client ID OpenAI issued at registration (oaiapp_...).
+CREATE TABLE IF NOT EXISTS chatgpt_accounts (
+    id                BIGSERIAL PRIMARY KEY,
+    issuer            TEXT NOT NULL,
+    subject           TEXT NOT NULL,
+    email             TEXT NOT NULL DEFAULT '',
+    client_id         TEXT NOT NULL,
+    id_token          TEXT NOT NULL DEFAULT '',
+    access_token      TEXT NOT NULL DEFAULT '',
+    refresh_token     TEXT NOT NULL DEFAULT '',
+    access_expires_at TIMESTAMPTZ,
+    scopes            TEXT[] NOT NULL DEFAULT '{}',
+    status            TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','needs_signin','plan_disabled')),
+    last_error        TEXT NOT NULL DEFAULT '',
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (issuer, subject)
+);
+DROP TRIGGER IF EXISTS trg_chatgpt_accounts_upd ON chatgpt_accounts;
+CREATE TRIGGER trg_chatgpt_accounts_upd BEFORE UPDATE ON chatgpt_accounts
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+-- RESTRICT: an account cannot be removed while a profile signs in with it.
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS oauth_account_id BIGINT REFERENCES chatgpt_accounts(id) ON DELETE RESTRICT;
