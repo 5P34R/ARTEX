@@ -47,6 +47,8 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
+	chatgpt *chatgptOAuth // Sign in with ChatGPT (chatgpt-plan profiles)
+
 	m      *Manager
 	engine *Engine
 	ctx    context.Context
@@ -207,6 +209,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	for _, o := range opts {
 		o(s)
 	}
+	s.chatgpt = newChatGPTOAuth(func() *db.DB { return s.m.pg })
+	s.chatgpt.onChange = s.afterChatGPTChange
 	s.initSetupToken()
 	s.loadPasswordVersion()
 	s.initSideQuestions()
@@ -435,6 +439,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.UserAgent = p.UserAgent
 	cfg.CustomHeaders = p.CustomHeaders
 	s.applyProfileRetry(&cfg, p)
+	s.applyProfileAuth(&cfg, p)
 	// Ollama profiles run keyless (local server); the other formats need a key.
 	if cfg.APIKey == "" && cfg.NeedsAPIKey() {
 		return cfg, false
@@ -621,6 +626,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.UserAgent = p.UserAgent
 	cfg.CustomHeaders = p.CustomHeaders
 	s.applyProfileRetry(&cfg, p)
+	s.applyProfileAuth(&cfg, p)
 	if cfg.APIKey == "" && cfg.NeedsAPIKey() {
 		return cfg, false
 	}
@@ -1029,6 +1035,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/llm/profiles", s.pgSaveProfile)
 	mux.HandleFunc("DELETE /api/llm/profiles/{id}", s.pgDeleteProfile)
 	mux.HandleFunc("POST /api/llm/profiles/active", s.pgActivateProfile)
+	mux.HandleFunc("GET /api/llm/chatgpt/accounts", s.chatgptListAccounts)
+	mux.HandleFunc("POST /api/llm/chatgpt/signin", s.chatgptStartSignin)
+	mux.HandleFunc("POST /api/llm/chatgpt/callback-paste", s.chatgptPasteCallback)
+	mux.HandleFunc("POST /api/llm/chatgpt/accounts/{id}/signout", s.chatgptSignOut)
+	mux.HandleFunc("DELETE /api/llm/chatgpt/accounts/{id}", s.chatgptDeleteAccount)
+	mux.HandleFunc("GET /api/llm/chatgpt/accounts/{id}/models", s.chatgptListModels)
 	mux.HandleFunc("GET /api/llm/retry-policy", s.pgGetLLMRetryPolicy)
 	mux.HandleFunc("POST /api/llm/retry-policy", s.pgSaveLLMRetryPolicy)
 	mux.HandleFunc("GET /api/llm/pool", s.pgLLMPoolStatus)
@@ -1090,6 +1102,10 @@ func (s *Server) Handler() http.Handler {
 	api := cors(s.requireAuth(mux))
 	root := http.NewServeMux()
 	root.Handle("/api/", api)
+	// The ChatGPT sign-in callback is a browser redirect from auth.openai.com: it
+	// carries no API token, so it sits outside requireAuth; its single-use state
+	// (created by an authenticated sign-in request) is the guard.
+	root.HandleFunc("GET "+chatgptCallbackPath, s.chatgptCallback)
 	webui := s.webuiHandler()
 	root.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Document-only headers; the shared ones come from securityHeaders.
@@ -1583,6 +1599,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		SessionHeaderKey string `json:"session_header_key"` // non-empty = the test also sends this custom session header, with a one-off random session id as the value
 		UserAgent        string `json:"user_agent"`         // non-empty = the test overrides the User-Agent header with this value (mirrors production)
 		CustomHeaders    string `json:"custom_headers"`
+		AccountID        int64  `json:"account_id,string,omitempty"` // chatgpt-plan: the signed-in account to test with
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1671,6 +1688,17 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	if _, err := agent.ParseBedrockGatewayHeaders(cfg.CustomHeaders); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if cfg.Format == agent.FormatChatGPTPlan {
+		accountID := req.AccountID
+		if accountID == 0 && stored != nil {
+			accountID = stored.OAuthAccountID
+		}
+		if accountID == 0 {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "sign in with ChatGPT first"})
+			return
+		}
+		s.applyProfileAuth(&cfg, &db.LLMProfile{OAuthAccountID: accountID})
 	}
 	// Keyless formats (Ollama) skip the key resolution entirely.
 	if cfg.NeedsAPIKey() {

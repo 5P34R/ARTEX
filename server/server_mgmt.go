@@ -2158,6 +2158,23 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	} else if p.CustomHeaders != "" {
 		writeErr(w, 400, "custom headers require the Bedrock gateway format")
 		return
+	} else if p.Format == db.FormatChatGPTPlan {
+		if p.OAuthAccountID == 0 {
+			writeErr(w, 400, "sign in with ChatGPT and pick the account for this profile")
+			return
+		}
+		if _, err := pg.ChatGPTAccountByID(p.OAuthAccountID); err != nil {
+			writeErr(w, 400, "the selected ChatGPT account does not exist")
+			return
+		}
+		// One endpoint, no key, no output cap (plan inference rejects it).
+		p.BaseURL, p.APIKey, p.MaxTokens = "", "", 0
+		if p.ID == 0 {
+			// No silent switch to a paid profile when the plan refuses: a new plan
+			// profile stays out of the failover chain unless the operator opts in.
+			p.PoolExclude = true
+		}
+		p.ClearCustomHeaders = true
 	} else {
 		p.ClearCustomHeaders = true
 	}

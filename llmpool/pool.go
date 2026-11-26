@@ -2,6 +2,8 @@ package llmpool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"iter"
@@ -217,8 +219,17 @@ var statusRe = regexp.MustCompile(`status (\d{3})`)
 // plan usage forbids silently switching to another billing path, so the
 // failover pool and the task chain both stay on the failing profile and surface
 // the error instead. The marker travels in the error text because the SDK
-// exposes no typed errors (see statusRe).
-const NoFailoverMarker = "[no-failover]"
+// exposes no typed errors (see statusRe). It carries a random per-process
+// suffix, so text an upstream echoes into an error body cannot spoof it.
+var NoFailoverMarker = "[no-failover:" + randomMarkerSuffix() + "]"
+
+func randomMarkerSuffix() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic("llmpool: no randomness for the no-failover marker: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
 
 // IsNoFailover reports whether err carries NoFailoverMarker.
 func IsNoFailover(err error) bool {
