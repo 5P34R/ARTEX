@@ -652,6 +652,11 @@ type LLMProfileDTO struct {
 	// window). Per item attempts: 0=inherit the global policy | -1=disable that retry
 	// layer | >0=count; interval_ms: 0=default exponential backoff | >0=use that fixed millisecond interval. All zero = fully follow the global policy, i.e. the historical behavior.
 	Retry db.RetryOverride `json:"retry"`
+	// Cost ledger prices, EUR per 1M tokens; 0 = unset.
+	PriceInputPerM      float64 `json:"price_input_per_m"`
+	PriceOutputPerM     float64 `json:"price_output_per_m"`
+	PriceCacheReadPerM  float64 `json:"price_cache_read_per_m"`
+	PriceCacheWritePerM float64 `json:"price_cache_write_per_m"`
 }
 
 func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
@@ -680,6 +685,11 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		OAuthAccountID:   i64sNonZero(p.OAuthAccountID),
 		CustomHeadersSet: p.CustomHeaders != "",
 		Retry:            p.Retry,
+
+		PriceInputPerM:      p.PriceInputPerM,
+		PriceOutputPerM:     p.PriceOutputPerM,
+		PriceCacheReadPerM:  p.PriceCacheReadPerM,
+		PriceCacheWritePerM: p.PriceCacheWritePerM,
 	}
 }
 
