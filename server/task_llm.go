@@ -80,6 +80,23 @@ func isTaskLLMChainExhausted(err error) bool {
 	return errors.As(err, &target) && target.chainExhausted
 }
 
+// planRefusalError handles an error that carries llmpool.NoFailoverMarker (a
+// ChatGPT plan refusal): it never advances the task chain, because plan usage
+// must not silently move to another billing path. A durable refusal (usage
+// limit, eligibility, revoked sign-in: anything but a 503) ends the call as an
+// exhausted chain, so the intent settles as blocked on LLM quota instead of
+// re-running until the task budget is spent; a transient 503 passes through.
+// ok=false when err is not a plan refusal.
+func planRefusalError(taskID string, err error) (error, bool) {
+	if !llmpool.IsNoFailover(err) {
+		return nil, false
+	}
+	if llmpool.StatusOf(err) == 503 {
+		return err, true
+	}
+	return &taskLLMError{taskID: taskID, chainExhausted: true, cause: err}, true
+}
+
 // isQuotaExhaustedError is intentionally strict. A generic 429, auth error,
 // network failure, or 5xx does not rotate providers; the response must explicitly
 // identify quota, credits, billing balance, or payment exhaustion.
@@ -393,6 +410,9 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 			resetLLMFailStreak(taskID, selection.profileID)
 			return msg, sr, total, nil
 		}
+		if planErr, ok := planRefusalError(taskID, callErr); ok {
+			return llm.Message{}, "", total, planErr
+		}
 		// Non-quota failures on a chain profile escalate after a consecutive
 		// streak (#99): same advance path as quota exhaust, truthful reason.
 		if selection.profileID != 0 && !isQuotaExhaustedError(callErr) && ctx.Err() == nil {
@@ -535,6 +555,13 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 				}
 				return
 			}
+			if planErr, ok := planRefusalError(taskID, streamErr); ok {
+				if committed {
+					planErr = &taskLLMError{taskID: taskID, chainExhausted: llmpool.StatusOf(streamErr) != 503, cause: streamErr}
+				}
+				yield(llm.StreamEvent{}, planErr)
+				return
+			}
 			// Non-quota failures on a chain profile escalate after a consecutive
 			// streak (#99), mirroring completeTaskLLM. Escalation only applies to
 			// uncommitted streams: once events reached the caller, replaying on a
@@ -657,6 +684,11 @@ func isRetryableStreamError(err error) bool {
 	}
 	if isQuotaExhaustedError(err) {
 		return false
+	}
+	// A ChatGPT plan refusal is retried only when OpenAI marks it transient
+	// (503); a usage limit or a revoked sign-in fails the same way every time.
+	if llmpool.IsNoFailover(err) {
+		return llmpool.StatusOf(err) == 503
 	}
 	s := strings.ToLower(err.Error())
 	if strings.Contains(s, "too long") || strings.Contains(s, "context length") ||

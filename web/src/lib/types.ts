@@ -1160,7 +1160,8 @@ export interface NotificationDelivery {
 export interface LLMProfile {
   id: string;
   name: string;
-  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "bedrock-gateway";
+  format: "openai" | "anthropic" | "openai-responses" | "ollama" | "bedrock-gateway" | "chatgpt-plan";
+  oauth_account_id?: string; // chatgpt-plan: the ChatGPT account it signs in with
   base_url?: string;
   proxy?: string;
   model: string;
@@ -1871,4 +1872,15 @@ export interface TamperTraceLine {
 export interface TamperDryRunResult extends TamperDryRunIO {
   changed: boolean;
   lines: TamperTraceLine[] | null;
+}
+
+// A ChatGPT account signed in with "Sign in with ChatGPT" (chatgpt-plan profiles). Tokens never reach the UI.
+export interface ChatGPTAccount {
+  id: string;
+  email: string;
+  status: "active" | "needs_signin" | "plan_disabled";
+  plan_usage: boolean;
+  last_error?: string;
+  access_expires_at: string;
+  updated_at: string;
 }

@@ -70,6 +70,9 @@ type LLMProfile struct {
 	// request built from this profile. "" = don't override (keep the default UA);
 	// old profiles behave exactly as before. Maps to agent.Config.UserAgent.
 	UserAgent string `json:"user_agent"`
+	// OAuthAccountID references the chatgpt_accounts row a 'chatgpt-plan' profile
+	// signs in with (0 = none). Every other format ignores it and stores NULL.
+	OAuthAccountID int64 `json:"oauth_account_id,omitempty"`
 	// Cost ledger: EUR per 1M tokens (0 = unset; cost is computed only when a
 	// price is set). Set through the same profile API/SaveProfile path.
 	PriceInputPerM      float64 `json:"price_input_per_m,omitempty"`
@@ -95,8 +98,8 @@ type RetryOverride struct {
 // profileCols is the read column list (hint variant, no api key) shared by the
 // list query; profileColsKey is the same with api_key for the single-row loads.
 const profileRetryCols = `COALESCE(retry_connect_attempts,0),COALESCE(retry_connect_interval_ms,0),COALESCE(retry_empty_attempts,0),COALESCE(retry_empty_interval_ms,0),COALESCE(retry_stream_attempts,0),COALESCE(retry_stream_interval_ms,0)`
-const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,'')`
-const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,'')`
+const profileCols = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key_hint,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(oauth_account_id,0)`
+const profileColsKey = `id,name,format,COALESCE(base_url,''),COALESCE(proxy,''),model,COALESCE(api_key,''),rate_per_second,rate_per_minute,context_window_k,COALESCE(reasoning_effort,''),is_default,priority,pool_exclude,COALESCE(thinking_type,''),COALESCE(streaming,true),COALESCE(max_tokens,0),COALESCE(max_tokens_field,''),COALESCE(session_header_key,''),` + profileRetryCols + `,COALESCE(price_input_per_m,0),COALESCE(price_output_per_m,0),COALESCE(price_cache_read_per_m,0),COALESCE(price_cache_write_per_m,0),COALESCE(user_agent,''),COALESCE(custom_headers,''),COALESCE(oauth_account_id,0)`
 
 // scanProfile reads one row in the profileCols / profileColsKey column order. The
 // 7th column lands in APIKeyHint or APIKey depending on which list the caller used.
@@ -108,9 +111,12 @@ func scanProfile(sc interface{ Scan(...any) error }, into *string, p *LLMProfile
 		&p.Retry.Empty.Attempts, &p.Retry.Empty.IntervalMS,
 		&p.Retry.Stream.Attempts, &p.Retry.Stream.IntervalMS,
 		&p.PriceInputPerM, &p.PriceOutputPerM, &p.PriceCacheReadPerM, &p.PriceCacheWritePerM,
-		&p.UserAgent, &p.CustomHeaders)
+		&p.UserAgent, &p.CustomHeaders, &p.OAuthAccountID)
 	if err != nil {
 		return err
+	}
+	if p.Format == storedFormatChatGPTPlan && p.OAuthAccountID != 0 {
+		p.Format = FormatChatGPTPlan
 	}
 	if p.Proxy, err = openSecret(colLLMProxy, p.Proxy); err != nil || into != &p.APIKey {
 		return err
@@ -168,7 +174,7 @@ func (d *DB) ProfileByID(id int64) (*LLMProfile, error) {
 // slice front to back.
 func (d *DB) PoolProfiles() ([]*LLMProfile, error) {
 	rows, err := d.Query(`SELECT ` + profileColsKey + ` FROM llm_profiles
-WHERE (COALESCE(api_key,'') <> '' OR format='ollama') AND (is_default OR NOT pool_exclude)
+WHERE (COALESCE(api_key,'') <> '' OR format='ollama' OR (format='openai-responses' AND oauth_account_id IS NOT NULL)) AND (is_default OR NOT pool_exclude)
 ORDER BY is_default DESC, priority DESC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -191,6 +197,10 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 	// through ConfigFrom trims, so store the trimmed form or the raw value
 	// leaks into paths that assign it directly (the llm/test fallback).
 	p.APIKey = strings.TrimSpace(p.APIKey)
+	if p.Format == FormatChatGPTPlan {
+		// Signs in with OAuth: never stores an API key (the no-key UPDATE clears any old one).
+		p.APIKey, p.APIKeyHint = "", ""
+	}
 	hint := p.APIKeyHint
 	if len(p.APIKey) >= 4 {
 		hint = "…" + p.APIKey[len(p.APIKey)-4:]
@@ -217,30 +227,40 @@ func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
 			return 0, err
 		}
 	}
+	if p.Format != FormatChatGPTPlan {
+		p.OAuthAccountID = 0
+	} else if p.OAuthAccountID == 0 {
+		return 0, ErrChatGPTProfileNeedsAccount
+	}
+	// Restore the caller's format after the write: the row stores the wire
+	// format, the struct keeps reporting the profile kind.
+	kind := p.Format
+	p.Format = storedProfileFormat(p.Format)
+	defer func() { p.Format = kind }()
 	r := p.Retry.Clamped()
 	if p.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,user_agent,custom_headers)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) RETURNING id`,
+		err := d.QueryRow(`INSERT INTO llm_profiles(name,format,base_url,proxy,model,api_key,api_key_hint,rate_per_second,rate_per_minute,context_window_k,reasoning_effort,priority,pool_exclude,thinking_type,streaming,max_tokens,max_tokens_field,session_header_key,retry_connect_attempts,retry_connect_interval_ms,retry_empty_attempts,retry_empty_interval_ms,retry_stream_attempts,retry_stream_interval_ms,user_agent,custom_headers,oauth_account_id)
+VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),$5,NULLIF($6,''),NULLIF($7,''),$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,NULLIF($27,0)) RETURNING id`,
 			p.Name, p.Format, p.BaseURL, proxy, p.Model, key, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
-			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, headerValue).Scan(&id)
+			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, headerValue, p.OAuthAccountID).Scan(&id)
 		if err == nil {
 			_, err = d.saveProfilePrices(id, p)
 		}
 		return id, err
 	}
 	if p.APIKey == "" {
-		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=CASE WHEN $2='bedrock-gateway' AND (format <> $2 OR COALESCE(base_url,'') <> $3) THEN '' ELSE api_key END,api_key_hint=CASE WHEN $2='bedrock-gateway' AND (format <> $2 OR COALESCE(base_url,'') <> $3) THEN '' ELSE api_key_hint END,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11,thinking_type=$12,streaming=$13,max_tokens=$14,max_tokens_field=$15,session_header_key=$16,retry_connect_attempts=$17,retry_connect_interval_ms=$18,retry_empty_attempts=$19,retry_empty_interval_ms=$20,retry_stream_attempts=$21,retry_stream_interval_ms=$22,user_agent=$23,custom_headers=CASE WHEN $25 THEN $26 WHEN format <> $2 OR COALESCE(base_url,'') <> $3 THEN '' ELSE custom_headers END WHERE id=$24`,
+		_, err := d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=CASE WHEN $27 <> 0 THEN NULL WHEN $2='bedrock-gateway' AND (format <> $2 OR COALESCE(base_url,'') <> $3) THEN '' ELSE api_key END,api_key_hint=CASE WHEN $27 <> 0 THEN NULL WHEN $2='bedrock-gateway' AND (format <> $2 OR COALESCE(base_url,'') <> $3) THEN '' ELSE api_key_hint END,rate_per_second=$6,rate_per_minute=$7,context_window_k=$8,reasoning_effort=$9,priority=$10,pool_exclude=$11,thinking_type=$12,streaming=$13,max_tokens=$14,max_tokens_field=$15,session_header_key=$16,retry_connect_attempts=$17,retry_connect_interval_ms=$18,retry_empty_attempts=$19,retry_empty_interval_ms=$20,retry_stream_attempts=$21,retry_stream_interval_ms=$22,user_agent=$23,custom_headers=CASE WHEN $25 THEN $26 WHEN format <> $2 OR COALESCE(base_url,'') <> $3 THEN '' ELSE custom_headers END,oauth_account_id=NULLIF($27,0) WHERE id=$24`,
 			p.Name, p.Format, p.BaseURL, proxy, p.Model, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
-			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, p.ID, replaceHeaders, headerValue)
+			r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, p.ID, replaceHeaders, headerValue, p.OAuthAccountID)
 		if err == nil {
 			_, err = d.saveProfilePrices(p.ID, p)
 		}
 		return p.ID, err
 	}
-	_, err = d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,user_agent=$25,custom_headers=CASE WHEN $27 THEN $28 WHEN format <> $2 OR COALESCE(base_url,'') <> $3 THEN '' ELSE custom_headers END WHERE id=$26`,
+	_, err = d.Exec(`UPDATE llm_profiles SET name=$1,format=$2,base_url=NULLIF($3,''),proxy=NULLIF($4,''),model=$5,api_key=$6,api_key_hint=$7,rate_per_second=$8,rate_per_minute=$9,context_window_k=$10,reasoning_effort=$11,priority=$12,pool_exclude=$13,thinking_type=$14,streaming=$15,max_tokens=$16,max_tokens_field=$17,session_header_key=$18,retry_connect_attempts=$19,retry_connect_interval_ms=$20,retry_empty_attempts=$21,retry_empty_interval_ms=$22,retry_stream_attempts=$23,retry_stream_interval_ms=$24,user_agent=$25,custom_headers=CASE WHEN $27 THEN $28 WHEN format <> $2 OR COALESCE(base_url,'') <> $3 THEN '' ELSE custom_headers END,oauth_account_id=NULLIF($29,0) WHERE id=$26`,
 		p.Name, p.Format, p.BaseURL, proxy, p.Model, key, hint, p.RatePerSecond, p.RatePerMinute, p.ContextWindowK, p.ReasoningEffort, p.Priority, p.PoolExclude, p.ThinkingType, p.Streaming, p.MaxTokens, p.MaxTokensField, p.SessionHeaderKey,
-		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, p.ID, replaceHeaders, headerValue)
+		r.Connect.Attempts, r.Connect.IntervalMS, r.Empty.Attempts, r.Empty.IntervalMS, r.Stream.Attempts, r.Stream.IntervalMS, p.UserAgent, p.ID, replaceHeaders, headerValue, p.OAuthAccountID)
 	if err == nil {
 		_, err = d.saveProfilePrices(p.ID, p)
 	}

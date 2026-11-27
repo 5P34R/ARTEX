@@ -2,6 +2,8 @@ package llmpool
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"iter"
@@ -212,6 +214,31 @@ func rotateGroups(in []*Member, n uint64) []*Member {
 // typed error, so the string is what we have.
 var statusRe = regexp.MustCompile(`status (\d{3})`)
 
+// NoFailoverMarker tags an error that must never move work to another profile:
+// a ChatGPT plan refusal (usage limit, eligibility, revoked sign-in). OpenAI's
+// plan usage forbids silently switching to another billing path, so the
+// failover pool and the task chain both stay on the failing profile and surface
+// the error instead. The marker travels in the error text because the SDK
+// exposes no typed errors (see statusRe). It carries a random per-process
+// suffix, so text an upstream echoes into an error body cannot spoof it.
+var NoFailoverMarker = "[no-failover:" + randomMarkerSuffix() + "]"
+
+func randomMarkerSuffix() string {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic("llmpool: no randomness for the no-failover marker: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+// IsNoFailover reports whether err carries NoFailoverMarker.
+func IsNoFailover(err error) bool {
+	return err != nil && strings.Contains(err.Error(), NoFailoverMarker)
+}
+
+// StatusOf returns the HTTP status carried by err, or 0 if it isn't one.
+func StatusOf(err error) int { return statusOf(err) }
+
 // statusOf returns the HTTP status carried by err, or 0 if it isn't one.
 func statusOf(err error) int {
 	m := statusRe.FindStringSubmatch(err.Error())
@@ -233,6 +260,9 @@ func shouldFailover(ctx context.Context, err error) bool {
 		return false
 	}
 	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if IsNoFailover(err) {
 		return false
 	}
 	switch code := statusOf(err); {

@@ -646,6 +646,8 @@ type LLMProfileDTO struct {
 	// User-Agent header with this value. '' = do not override (keep the default UA).
 	UserAgent        string `json:"user_agent"`
 	CustomHeadersSet bool   `json:"custom_headers_set"`
+	// OAuthAccountID is the ChatGPT account a chatgpt-plan profile signs in with ("" otherwise).
+	OAuthAccountID string `json:"oauth_account_id,omitempty"`
 	// This profile's retry overrides (connect / empty response / same-provider safe
 	// window). Per item attempts: 0=inherit the global policy | -1=disable that retry
 	// layer | >0=count; interval_ms: 0=default exponential backoff | >0=use that fixed millisecond interval. All zero = fully follow the global policy, i.e. the historical behavior.
@@ -675,6 +677,7 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		MaxTokensField:   p.MaxTokensField,
 		SessionHeaderKey: p.SessionHeaderKey,
 		UserAgent:        p.UserAgent,
+		OAuthAccountID:   i64sNonZero(p.OAuthAccountID),
 		CustomHeadersSet: p.CustomHeaders != "",
 		Retry:            p.Retry,
 	}
@@ -695,4 +698,12 @@ func idStrings(in []int64) []string {
 		out = append(out, i64s(v))
 	}
 	return out
+}
+
+// i64sNonZero formats an id as a string, "" for 0.
+func i64sNonZero(v int64) string {
+	if v == 0 {
+		return ""
+	}
+	return i64s(v)
 }

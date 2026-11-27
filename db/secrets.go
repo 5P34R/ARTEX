@@ -96,7 +96,11 @@ var (
 	colHookSource      = secretColumn{"traffic_tamper_hooks", "source", false, ""}
 	colHookVerMatchers = secretColumn{"traffic_tamper_hook_versions", "matchers", true, ""}
 	colHookVerSource   = secretColumn{"traffic_tamper_hook_versions", "source", false, ""}
-	secretColumns      = append([]secretColumn{colLLMKey, colLLMProxy, colLLMHeaders, colMCPEnv, colCredPass, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions, colHookMatchers, colHookSource, colHookVerMatchers, colHookVerSource}, secretSettingColumns()...)
+	// ChatGPT plan OAuth tokens (chatgpt_accounts).
+	colChatGPTIDToken      = secretColumn{"chatgpt_accounts", "id_token", false, ""}
+	colChatGPTAccessToken  = secretColumn{"chatgpt_accounts", "access_token", false, ""}
+	colChatGPTRefreshToken = secretColumn{"chatgpt_accounts", "refresh_token", false, ""}
+	secretColumns          = append([]secretColumn{colLLMKey, colLLMProxy, colLLMHeaders, colMCPEnv, colCredPass, colNotifConfig, colToolExec, colEvReqHead, colEvRespHead, colRewriteMatchers, colRewriteActions, colHookMatchers, colHookSource, colHookVerMatchers, colHookVerSource, colChatGPTIDToken, colChatGPTAccessToken, colChatGPTRefreshToken}, secretSettingColumns()...)
 )
 
 // secretSettingKeys are the settings stored encrypted, AAD "settings.<key>".
